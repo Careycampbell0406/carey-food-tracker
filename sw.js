@@ -1,6 +1,6 @@
 // Offline cache for Carey's Food Tracker
-const CACHE = 'carey-ft-v2';
-const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
+const CACHE = 'carey-ft-v3';
+const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png', './zxing.min.js'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
 });
@@ -10,6 +10,8 @@ self.addEventListener('activate', e => {
 // Network first (so updates arrive), fall back to cache when offline
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  // Only handle this app's own files; let Open Food Facts and other sites go straight to the network
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith(
     fetch(e.request).then(res => {
       // if the host is down or the link has expired, keep using the saved copy

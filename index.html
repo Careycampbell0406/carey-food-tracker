@@ -143,6 +143,13 @@ label.f{display:block;margin:12px 0 6px;font-weight:600;font-size:15px}
 .gymrow .sw{flex:none;width:60px;height:34px;border-radius:17px;background:var(--track);position:relative;transition:background .2s}
 .gymrow .sw::after{content:"";position:absolute;top:3px;left:3px;width:28px;height:28px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .2s}
 .gymrow.on .sw{background:var(--accent)}.gymrow.on .sw::after{left:29px}
+#scanOverlay{position:fixed;inset:0;background:#000;z-index:100;display:flex;flex-direction:column}
+#scanOverlay video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#scanOverlay .vf{position:absolute;left:10%;right:10%;top:30%;height:22%;border:3px solid #fff;border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.45)}
+#scanOverlay .line{position:absolute;left:6%;right:6%;top:50%;height:2px;background:#ff4d4d}
+#scanOverlay .scanmsg{position:absolute;top:calc(env(safe-area-inset-top) + 24px);left:16px;right:16px;color:#fff;text-align:center;font-weight:600;font-size:17px;text-shadow:0 1px 3px #000}
+#scanOverlay .scanbtns{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 20px);left:12px;right:12px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+#scanOverlay .scanbtns .btn{flex:1 1 30%}
 </style>
 </head>
 <body>
@@ -622,11 +629,13 @@ function openAdd(meal) {
   openSheet("Add food", `
     <div class="seg" id="mealSeg">${MEALS.map(([m, l]) => `<button data-m="${m}" class="${m === addMeal ? "on" : ""}">${l}</button>`).join("")}</div>
     <input class="input" id="q" type="search" placeholder="Search foods, e.g. egg, Tim Hortons, yogurt" autocomplete="off" style="margin-top:12px">
+    <button class="btn block" id="scanBtn" style="margin-top:12px;font-size:18px">📷 Scan barcode</button>
     <button class="btn secondary block sm" id="newCustom" style="margin-top:10px">＋ Create a custom food</button>
     <div id="results"></div>`);
   $("#mealSeg").onclick = e => { const b = e.target.closest("button"); if (!b) return; addMeal = b.dataset.m; $("#mealSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); };
   $("#q").oninput = e => { addQuery = e.target.value; renderResults(); };
   $("#newCustom").onclick = () => openCustom(null, addQuery);
+  $("#scanBtn").onclick = openScanner;
   renderResults();
 }
 function foodRow(f) {
@@ -699,6 +708,176 @@ function addEntry(f, qty, meal) {
   S.recent = [f.id].concat(S.recent.filter(x => x !== f.id)).slice(0, 30);
   save(); render();
 }
+
+
+/* ============ Barcode scanner (Open Food Facts, free, no keys) ============ */
+let scanStream = null, scanTimer = null, scanDone = false;
+function stopScan() {
+  scanDone = true; clearTimeout(scanTimer); scanTimer = null;
+  if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+  const o = $("#scanOverlay"); if (o) o.remove();
+}
+let zxingP = null;
+function loadZXing() {
+  if (window.ZXing) return Promise.resolve(window.ZXing);
+  return zxingP = zxingP || new Promise((res, rej) => { const s = document.createElement("script"); s.src = "./zxing.min.js"; s.onload = () => res(window.ZXing); s.onerror = () => { zxingP = null; rej(new Error("zxing")); }; document.head.appendChild(s); });
+}
+const BC_FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e"];
+async function nativeDetector() {
+  if (!("BarcodeDetector" in window)) return null;
+  try { const ok = await BarcodeDetector.getSupportedFormats(); const f = BC_FORMATS.filter(x => ok.includes(x)); return f.length ? new BarcodeDetector({ formats: f }) : null; } catch (e) { return null; }
+}
+function zxReader(Z) {
+  const hints = new Map(); hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E]); hints.set(Z.DecodeHintType.TRY_HARDER, true);
+  const r = new Z.MultiFormatReader(); r.setHints(hints); return r;
+}
+function zxDecodeCanvas(Z, reader, cv) {
+  try { const src = new Z.HTMLCanvasElementLuminanceSource(cv); return reader.decode(new Z.BinaryBitmap(new Z.HybridBinarizer(src))).getText(); } catch (e) { return null; }
+}
+function openScanner() {
+  closeSheet(); stopScan(); scanDone = false;
+  const o = document.createElement("div"); o.id = "scanOverlay";
+  o.innerHTML = `<video id="scanVid" playsinline muted autoplay></video><div class="vf"><div class="line"></div></div>
+    <div class="scanmsg" id="scanMsg">Starting camera…</div>
+    <div class="scanbtns"><button class="btn secondary" id="scanType">⌨️ Type number</button><button class="btn secondary" id="scanPhoto">🖼️ Take photo</button><button class="btn ghost" id="scanClose" style="color:#fff;border-color:#fff">✕ Close</button></div>`;
+  document.body.appendChild(o);
+  $("#scanClose").onclick = () => { stopScan(); openAdd(addMeal); };
+  $("#scanType").onclick = () => { stopScan(); openTypeBarcode(); };
+  $("#scanPhoto").onclick = () => { stopScan(); pickBarcodePhoto(); };
+  startCamera();
+}
+async function startCamera() {
+  const msg = t => { const m = $("#scanMsg"); if (m) m.textContent = t; };
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { msg("This browser can't open the camera here. Type the number or take a photo instead."); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }); }
+  catch (e) { msg(e && e.name === "NotAllowedError" ? "Camera permission is off. Allow the camera for this app in Chrome site settings, or use Type number / Take photo below." : "Couldn't open the camera. Use Type number or Take photo below."); return; }
+  if (scanDone || !$("#scanOverlay")) { stream.getTracks().forEach(t => t.stop()); return; }
+  scanStream = stream; const v = $("#scanVid"); v.srcObject = stream; try { await v.play(); } catch (e) {}
+  msg("Point at the barcode on the box");
+  const det = await nativeDetector();
+  let Z = null, reader = null, cv = null;
+  if (!det) { try { Z = await loadZXing(); reader = zxReader(Z); cv = document.createElement("canvas"); } catch (e) { msg("Scanner couldn't load. Type the number instead."); return; } }
+  const tick = async () => {
+    if (scanDone) return;
+    let code = null;
+    try {
+      if (v.readyState >= 2 && v.videoWidth) {
+        if (det) { const r = await det.detect(v); if (r && r.length) code = r[0].rawValue; }
+        else { const w = Math.min(960, v.videoWidth), h = Math.round(v.videoHeight * w / v.videoWidth); cv.width = w; cv.height = h; cv.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0, w, h); code = zxDecodeCanvas(Z, reader, cv); }
+      }
+    } catch (e) {}
+    if (code && /^\d{6,14}$/.test(code)) { if (navigator.vibrate) navigator.vibrate(80); stopScan(); lookupBarcode(code); return; }
+    scanTimer = setTimeout(tick, det ? 150 : 300);
+  };
+  tick();
+}
+function pickBarcodePhoto() {
+  const i = document.createElement("input"); i.type = "file"; i.accept = "image/*"; i.capture = "environment";
+  i.onchange = async () => {
+    const file = i.files && i.files[0]; if (!file) return;
+    toast("Reading barcode…");
+    try {
+      const img = await createImageBitmap(file); let code = null;
+      const det = await nativeDetector();
+      if (det) { const r = await det.detect(img); if (r.length) code = r[0].rawValue; }
+      if (!code) { const Z = await loadZXing(); const cv = document.createElement("canvas"); const s = Math.min(1, 1600 / img.width); cv.width = img.width * s; cv.height = img.height * s; cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height); code = zxDecodeCanvas(Z, zxReader(Z), cv); }
+      if (code) lookupBarcode(code); else { toast("No barcode found in that photo"); openTypeBarcode(); }
+    } catch (e) { toast("Couldn't read that photo"); openTypeBarcode(); }
+  };
+  i.click();
+}
+function openTypeBarcode() {
+  openSheet("Type barcode number", `<p class="muted small" style="margin:6px 0">The digits under the barcode (8, 12 or 13 numbers).</p>
+    <input class="input" id="bcNum" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 0055577102183" autocomplete="off">
+    <button class="btn block" id="bcGo" style="margin-top:14px">Look it up</button>
+    <button class="btn ghost block" id="bcBack" style="margin-top:10px">Back</button>`);
+  const go = () => { const c = $("#bcNum").value.replace(/\D/g, ""); if (c.length < 6) return toast("Enter the barcode digits"); lookupBarcode(c); };
+  $("#bcGo").onclick = go; $("#bcNum").onkeydown = e => { if (e.key === "Enter") go(); };
+  $("#bcBack").onclick = () => openAdd(addMeal);
+  setTimeout(() => $("#bcNum") && $("#bcNum").focus(), 50);
+}
+function normCode(c) { c = String(c).replace(/\D/g, ""); return c.length === 12 ? "0" + c : c; }
+function customByBarcode(code) { const n = normCode(code); return S.custom.find(c => c.barcode && normCode(c.barcode) === n); }
+async function lookupBarcode(code) {
+  code = String(code).replace(/\D/g, "");
+  const mine = customByBarcode(code);
+  if (mine) { toast("Found in your foods"); openQty(Object.assign({ custom: true }, mine)); return; }
+  openSheet("Looking up…", `<p class="muted" style="margin:16px 0">Checking Open Food Facts for <b>${esc(code)}</b>…</p>`);
+  let p = null, failed = false;
+  try {
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 12000);
+    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,product_name_en,brands,serving_size,serving_quantity,nutriments`, { signal: ctl.signal });
+    clearTimeout(to);
+    if (r.ok) { const d = await r.json(); if (d && d.status === 1 && d.product) p = d.product; } else if (r.status !== 404) failed = true;
+  } catch (e) { failed = true; }
+  const n = p && p.nutriments || {};
+  const num = x => (x === undefined || x === null || x === "" || isNaN(+x)) ? null : +x;
+  const k100 = num(n["energy-kcal_100g"]) ?? (num(n["energy_100g"]) != null ? num(n["energy_100g"]) / 4.184 : null);
+  const kS = num(n["energy-kcal_serving"]) ?? (num(n["energy_serving"]) != null ? num(n["energy_serving"]) / 4.184 : null);
+  if (!p || (kS == null && k100 == null)) { openBarcodeManual(code, p, failed); return; }
+  openBarcodeConfirm(code, p, { kS, pS: num(n.proteins_serving), k100, p100: num(n.proteins_100g) });
+}
+function openBarcodeConfirm(code, p, v) {
+  const name = (p.product_name || p.product_name_en || "Scanned product").trim(), brand = (p.brands || "").split(",")[0].trim();
+  const perServing = v.kS != null;
+  let grams = +p.serving_quantity > 0 ? +p.serving_quantity : 100;
+  openSheet("Scanned product", `<div class="card" id="bcCard" style="margin:8px 0 0;box-shadow:none;border:1px solid var(--line)">
+      <div style="font-size:19px;font-weight:700">${esc(name)}</div>
+      <div class="muted small">${brand ? esc(brand) + " · " : ""}barcode ${esc(code)}</div>
+      ${perServing ? `<div class="muted" style="margin-top:6px">1 serving = ${esc(p.serving_size || "1 serving")} · <b>${fmt(v.kS)}</b> cal · <b>${fmt(v.pS || 0)}g</b> protein</div>`
+        : `<div class="muted" style="margin-top:6px">Label per 100 g: <b>${fmt(v.k100)}</b> cal · <b>${fmt(v.p100 || 0)}g</b> protein</div>
+           <label class="f" for="bcG">Grams per serving (edit to match the label)</label><input class="input" id="bcG" type="number" inputmode="decimal" value="${r0(grams)}">`}
+    </div>
+    ${stepperHTML(1)}
+    <div class="bigtotal"><div><b id="qk"></b><span class="muted small">calories</span></div><div><b id="qp"></b><span class="muted small">protein</span></div></div>
+    <div class="seg" id="mealSeg2">${MEALS.map(([m, l]) => `<button data-m="${m}" class="${m === addMeal ? "on" : ""}">${l}</button>`).join("")}</div>
+    <button class="btn block" id="doAdd" style="margin-top:14px">Add to log</button>
+    <button class="btn ghost block" id="bcFix" style="margin-top:10px">Numbers look wrong? Enter from label</button>
+    <p class="muted small" style="margin-top:8px">Data from Open Food Facts (free, community-made). Saved to My foods so the next scan is instant.</p>`);
+  let q = 1;
+  const unit = () => { if (perServing) return { kcal: v.kS, protein: v.pS || 0, serving: p.serving_size || "1 serving" }; const g = +$("#bcG").value || 0; return { kcal: v.k100 * g / 100, protein: (v.p100 || 0) * g / 100, serving: r0(g) + " g" }; };
+  const upd = () => { const u = unit(); $("#qk").textContent = fmt(u.kcal * q); $("#qp").textContent = fmt(u.protein * q) + "g"; };
+  wireStepper(x => { q = x; upd(); }); if ($("#bcG")) $("#bcG").oninput = upd; upd();
+  $("#mealSeg2").onclick = e => { const b = e.target.closest("button"); if (!b) return; addMeal = b.dataset.m; $("#mealSeg2").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); };
+  $("#doAdd").onclick = () => {
+    const u = unit(); if (!(q > 0) || !(u.kcal >= 0)) return toast("Check the amount");
+    const f = saveBarcodeFood(code, (brand && !name.toLowerCase().includes(brand.toLowerCase()) ? brand + " " : "") + name, u.serving, u.kcal, u.protein);
+    addEntry(f, q, addMeal); closeSheet(); toast("Added " + f.name);
+  };
+  $("#bcFix").onclick = () => openBarcodeManual(code, p, false);
+}
+function saveBarcodeFood(code, name, serving, kcal, protein) {
+  const data = { name: name.slice(0, 80), serving, kcal: r0(kcal), protein: Math.round(protein * 10) / 10, barcode: normCode(code) };
+  let f = customByBarcode(code);
+  if (f) Object.assign(f, data); else { f = Object.assign({ id: "bc" + normCode(code) }, data); S.custom = S.custom.filter(x => x.id !== f.id); S.custom.unshift(f); }
+  save(); return Object.assign({ custom: true }, f);
+}
+function openBarcodeManual(code, p, failed) {
+  const nm = p ? ((p.brands ? p.brands.split(",")[0].trim() + " " : "") + (p.product_name || "")).trim() : "";
+  openSheet(p ? "Enter from label" : "Not found", `
+    <p class="muted" style="margin:6px 0">${failed ? "Couldn't reach the food database (no internet?)." : p ? "Type the numbers from the nutrition label." : "This barcode isn't in the free food database yet."} Enter the label numbers once and it's saved to this barcode, so next time the scan is instant.</p>
+    <label class="f" for="mName">Food name</label><input class="input" id="mName" value="${esc(nm)}" placeholder="e.g. Kirkland protein bar">
+    <label class="f" for="mServ">Serving size</label><input class="input" id="mServ" value="${esc(p && p.serving_size || "1 serving")}">
+    <div class="row"><div class="grow"><label class="f" for="mK">Calories</label><input class="input" id="mK" type="number" inputmode="numeric"></div>
+      <div class="grow"><label class="f" for="mP">Protein (g)</label><input class="input" id="mP" type="number" inputmode="decimal"></div></div>
+    ${stepperHTML(1)}
+    <div class="seg" id="mealSeg2" style="margin-top:12px">${MEALS.map(([m, l]) => `<button data-m="${m}" class="${m === addMeal ? "on" : ""}">${l}</button>`).join("")}</div>
+    <button class="btn block" id="mSave" style="margin-top:14px">Save and add</button>
+    ${failed ? `<button class="btn secondary block" id="mRetry" style="margin-top:10px">Try lookup again</button>` : ""}
+    <button class="btn ghost block" id="mBack" style="margin-top:10px">Back</button>`);
+  let q = 1; wireStepper(x => { q = x; });
+  $("#mealSeg2").onclick = e => { const b = e.target.closest("button"); if (!b) return; addMeal = b.dataset.m; $("#mealSeg2").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); };
+  $("#mSave").onclick = () => {
+    const name = $("#mName").value.trim(), k = +$("#mK").value;
+    if (!name) return toast("Give it a name"); if ($("#mK").value === "" || !(k >= 0 && k < 10000)) return toast("Enter the calories");
+    const f = saveBarcodeFood(code, name, $("#mServ").value.trim() || "1 serving", k, +$("#mP").value || 0);
+    addEntry(f, q > 0 ? q : 1, addMeal); closeSheet(); toast("Saved and added " + f.name);
+  };
+  if ($("#mRetry")) $("#mRetry").onclick = () => lookupBarcode(code);
+  $("#mBack").onclick = () => openAdd(addMeal);
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden && scanStream) { stopScan(); } });
 
 /* Custom foods */
 function openCustom(existing, prefill) {
