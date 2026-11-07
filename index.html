@@ -137,6 +137,12 @@ label.f{display:block;margin:12px 0 6px;font-weight:600;font-size:15px}
 .empty{color:var(--muted);font-size:15px;padding:6px 0}
 .legend{display:flex;gap:14px;font-size:13px;color:var(--muted);justify-content:center;margin-top:6px}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.gymrow{display:flex;align-items:center;gap:12px;margin-top:14px;padding:14px 16px;border-radius:14px;border:2px solid var(--track);cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;min-height:64px}
+.gymrow.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
+.gymrow input{position:absolute;opacity:0;width:1px;height:1px}
+.gymrow .sw{flex:none;width:60px;height:34px;border-radius:17px;background:var(--track);position:relative;transition:background .2s}
+.gymrow .sw::after{content:"";position:absolute;top:3px;left:3px;width:28px;height:28px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .2s}
+.gymrow.on .sw{background:var(--accent)}.gymrow.on .sw::after{left:29px}
 </style>
 </head>
 <body>
@@ -478,7 +484,7 @@ function baseTargets() { return S.targets || { kcal: 1850, protein: 170 }; }
 function isGymDay(k) { return !!(S.gymDays && S.gymDays[k || curDay]); }
 function targets(k) {
   const T = Object.assign({}, baseTargets());
-  if (isGymDay(k || curDay)) T.kcal = Math.max(T.kcal, 2000);
+  if (isGymDay(k || curDay)) T.kcal = Math.max(T.kcal + 150, 2000);
   return T;
 }
 
@@ -523,9 +529,10 @@ function renderToday() {
       <div class="ringbox">${ring(t.protein, T.protein, "var(--prot)", pLeft > 0 ? fmt(pLeft) + "g" : "✓", pLeft > 0 ? "protein left" : "protein done")}
         <div class="sub"><b>${fmt(t.protein)}g</b> of ${fmt(T.protein)}g protein</div></div>
     </div>
-    <label class="row" style="margin-top:14px;gap:12px;cursor:pointer;user-select:none" id="gymToggleRow">
-      <input type="checkbox" id="gymDay" ${isGymDay(curDay) ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--accent)">
-      <div class="grow"><b>Gym day</b><div class="muted small">Raises calorie target to 2,000 for this day</div></div>
+    <label class="gymrow ${isGymDay(curDay) ? "on" : ""}" id="gymToggleRow">
+      <div class="grow"><b style="font-size:18px">🏋️ Gym day: ${isGymDay(curDay) ? "ON" : "OFF"}</b><div class="small" style="opacity:.85">Target today: <b>${fmt(T.kcal)} cal</b>${isGymDay(curDay) ? " (gym bump)" : " · tap to raise for a gym day"}</div></div>
+      <input type="checkbox" id="gymDay" ${isGymDay(curDay) ? "checked" : ""}>
+      <span class="sw" aria-hidden="true"></span>
     </label>
   </div>
   <div class="card" id="suggest">${suggestionsHTML(kLeft, pLeft)}</div>`;
@@ -554,7 +561,7 @@ function renderToday() {
     S.gymDays = S.gymDays || {};
     if (gym.checked) S.gymDays[curDay] = true; else delete S.gymDays[curDay];
     save(); render();
-    toast(gym.checked ? "Gym day on · 2,000 cal target" : "Regular day · 1,850 cal target");
+    toast(gym.checked ? "Gym day ON · target " + fmt(targets().kcal) + " cal" : "Regular day · target " + fmt(targets().kcal) + " cal");
   };
 }
 
