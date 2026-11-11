@@ -21,6 +21,7 @@
   --bg:#f6f7f9; --card:#ffffff; --text:#1b1f24; --muted:#6b7480; --line:#e4e7eb;
   --accent:#16a36f; --accent2:#0f7f56; --accent-soft:#e3f5ee;
   --prot:#4f6cf5; --prot-soft:#e7ebfe; --warn:#e5534b; --warn-soft:#fde8e7; --track:#e9ecef;
+  --water:#2a9fd0; --water-soft:#e4f4fb;
   --shadow:0 1px 3px rgba(0,0,0,.06),0 4px 14px rgba(0,0,0,.05);
 }
 @media (prefers-color-scheme: dark){
@@ -28,6 +29,7 @@
     --bg:#101418; --card:#1a2027; --text:#eef1f4; --muted:#9aa4af; --line:#2a323b;
     --accent:#2ec48a; --accent2:#5fd8a8; --accent-soft:#16352a;
     --prot:#7d92ff; --prot-soft:#1f2747; --warn:#ff7b72; --warn-soft:#3a1d1c; --track:#2a323b;
+    --water:#5cc4e8; --water-soft:#163140;
     --shadow:none;
   }
 }
@@ -143,6 +145,22 @@ label.f{display:block;margin:12px 0 6px;font-weight:600;font-size:15px}
 .gymrow .sw{flex:none;width:60px;height:34px;border-radius:17px;background:var(--track);position:relative;transition:background .2s}
 .gymrow .sw::after{content:"";position:absolute;top:3px;left:3px;width:28px;height:28px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .2s}
 .gymrow.on .sw{background:var(--accent)}.gymrow.on .sw::after{left:29px}
+
+.bar.w i{background:var(--water)}
+.whead{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.whead h2{margin:0;flex:1}
+.winfo{appearance:none;border:1px solid var(--line);background:var(--bg);width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer;color:var(--muted);flex:none}
+.wamt{font-size:22px;font-weight:750;letter-spacing:-.3px}
+.wbar{height:14px;background:var(--track);border-radius:8px;overflow:hidden;margin:8px 0}
+.wbar i{display:block;height:100%;background:var(--water);border-radius:8px;transition:width .2s}
+.wbtns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px}
+.wbtn{appearance:none;border:1.5px solid var(--line);background:var(--water-soft);color:var(--text);border-radius:14px;padding:10px 6px;min-height:62px;cursor:pointer;font-weight:650;font-size:13px;line-height:1.25;text-align:center}
+.wbtn b{display:block;font-size:15px;color:#1a7fa8}
+@media (prefers-color-scheme: dark){.wbtn b{color:var(--water)}}
+.wmore{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.wmore .wbtn{min-height:48px}
+.wcustom{display:flex;gap:8px;margin-top:8px;align-items:center}
+.wcustom .input{flex:1}
 #scanOverlay{position:fixed;inset:0;background:#000;z-index:100;display:flex;flex-direction:column}
 #scanOverlay video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 #scanOverlay .vf{position:absolute;left:10%;right:10%;top:30%;height:22%;border:3px solid #fff;border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.45)}
@@ -402,7 +420,7 @@ const FOODS = FOOD_TEXT.trim().split("\n").map((l, i) => {
 /* ============ Storage ============ */
 const KEY = "careyFoodTracker.v1";
 const MEALS = [["breakfast", "Breakfast"], ["lunch", "Lunch"], ["dinner", "Dinner"], ["snacks", "Snacks"]];
-function blankState() { return { version: 1, profile: null, targets: null, days: {}, gymDays: {}, custom: [], recent: [], favs: [] }; }
+function blankState() { return { version: 1, profile: null, targets: null, days: {}, gymDays: {}, water: {}, waterUnit: "L", custom: [], recent: [], favs: [] }; }
 let S = load();
 function load() {
   try {
@@ -495,6 +513,107 @@ function targets(k) {
   return T;
 }
 
+
+/* ============ Water ============ */
+function waterUnit() { return S.waterUnit === "oz" ? "oz" : "L"; }
+function waterMl(k) { return Math.max(0, Math.round(+((S.water || {})[k || curDay]) || 0)); }
+function waterBaseMl(gym) {
+  const p = S.profile || {};
+  let kg = 0; try { kg = profileKg(p); } catch (e) { kg = 0; }
+  if (!(kg > 25 && kg < 350)) kg = 81.65;
+  // 35 ml per kg, rounded up to the nearest quarter litre so the target isn't short
+  let L = Math.ceil(kg * 0.035 * 4 - 1e-9) / 4;
+  if (gym) L += 0.75;
+  return Math.round(L * 1000);
+}
+function waterTargetMl(k) {
+  k = k || curDay;
+  let ml = waterBaseMl(isGymDay(k));
+  // a little extra when he's eaten well over that day's calorie target
+  if (totals(k).kcal >= targets(k).kcal + 400) ml += 250;
+  return ml;
+}
+function fmtWater(ml, bare) {
+  if (waterUnit() === "oz") {
+    const oz = Math.round(ml / 29.5735295625 * 10) / 10;
+    const t = oz % 1 === 0 ? String(Math.round(oz)) : String(oz);
+    return bare ? t : t + " oz";
+  }
+  const L = Math.round(ml / 10) / 100;
+  let t;
+  if (Math.abs(L * 4 - Math.round(L * 4)) < 1e-6) {
+    const q = Math.round(L * 4) / 4;
+    t = (q % 1 === 0 || q % 0.5 === 0) ? q.toFixed(1) : q.toFixed(2);
+  } else t = L.toFixed(2);
+  return bare ? t : t + " L";
+}
+function waterWhy(k) {
+  k = k || curDay;
+  const p = S.profile || {};
+  const w = p.weight ? ((p.wUnit === "kg" ? p.weight + " kg" : p.weight + " lb") + " weight") : "your weight";
+  let s = "Based on your " + w;
+  if (isGymDay(k)) s += " + gym day";
+  if (totals(k).kcal >= targets(k).kcal + 400) s += " + a little extra for a high-calorie day";
+  return s;
+}
+function addWater(ml, k) {
+  k = k || curDay;
+  S.water = S.water || {};
+  S.water[k] = Math.max(0, Math.round((S.water[k] || 0) + ml));
+  save();
+}
+function waterCardHTML(k) {
+  const have = waterMl(k), T = waterTargetMl(k);
+  const left = T - have, done = have >= T, pct = T > 0 ? Math.min(100, have / T * 100) : 0;
+  const oz = waterUnit() === "oz";
+  const late = k === todayKey() && (new Date().getHours() >= 18) && have < T * 0.7;
+  const btn = (ml, name) => `<button type="button" class="wbtn" data-water="${ml}">+ ${name}<b>${oz ? Math.round(ml / 29.5735295625) + " oz" : ml + " ml"}</b></button>`;
+  return `<div class="card" id="waterCard">
+    <div class="whead"><h2>💧 Water</h2>
+      <div class="wamt">${fmtWater(have, true)} <span class="muted" style="font-size:15px;font-weight:600">of ${fmtWater(T)}</span></div>
+      <button type="button" class="winfo" id="wInfo" aria-label="How this target is calculated">i</button></div>
+    <div class="wbar" role="progressbar" aria-valuenow="${have}" aria-valuemax="${T}"><i style="width:${pct.toFixed(1)}%"></i></div>
+    <div class="muted small">${done ? "✓ Water target hit" : fmtWater(Math.max(0, left)) + " to go"} · ${esc(waterWhy(k))}</div>
+    ${late ? `<div class="muted small" style="margin-top:6px">It's getting late and you're a bit behind — a couple of glasses this evening will get you there.</div>` : ""}
+    <p class="muted tiny hidden" id="wWhyMore" style="margin:8px 0 0">Your target starts at about 35 ml of water per kilogram of body weight, rounded up to the nearest quarter litre. Gym days add 0.75 L for sweat. If you eat 400 or more calories over your food target, we add another 0.25 L. This is a guide, not a medical rule — coffee and tea count toward the total.</p>
+    <div class="wbtns">${btn(250, "Glass")}${btn(500, "Bottle")}${btn(750, "Large bottle")}</div>
+    <div class="wmore">
+      <button type="button" class="wbtn undo" data-water="-250">− ${oz ? "8 oz" : "250 ml"}<b>Undo</b></button>
+      <button type="button" class="wbtn undo" id="wCustomBtn">Custom<b>${oz ? "ounces" : "litres"}</b></button>
+    </div>
+    <div class="wcustom hidden" id="wCustomRow">
+      <input class="input" id="wAmt" type="number" inputmode="decimal" min="0" step="${oz ? "1" : "0.05"}" placeholder="${oz ? "e.g. 8" : "e.g. 0.3"}" aria-label="Custom amount">
+      <span class="muted small" style="flex:none">${oz ? "oz" : "L"}</span>
+      <button class="btn sm" id="wAddCustom" type="button">Add</button>
+    </div>
+  </div>`;
+}
+function wireWater() {
+  app.querySelectorAll("[data-water]").forEach(b => b.onclick = () => {
+    const d = +b.dataset.water; addWater(d);
+    const have = waterMl(curDay), T = waterTargetMl(curDay);
+    toast(d < 0 && have === 0 && waterMl(curDay) === 0 ? "Water reset for this day" : have >= T ? "Water target hit ✓" : fmtWater(Math.max(0, T - have)) + " to go");
+    render();
+  });
+  const info = $("#wInfo");
+  if (info) info.onclick = () => { const el = $("#wWhyMore"); if (el) el.classList.toggle("hidden"); };
+  const cust = $("#wCustomBtn");
+  if (cust) cust.onclick = () => { $("#wCustomRow").classList.toggle("hidden"); const inp = $("#wAmt"); if (inp && !$("#wCustomRow").classList.contains("hidden")) inp.focus(); };
+  const add = $("#wAddCustom");
+  if (add) add.onclick = () => {
+    let v = +$("#wAmt").value;
+    if (!(v > 0) || v > 20000) return toast("Enter an amount");
+    let ml;
+    if (waterUnit() === "oz") ml = v * 29.5735295625;
+    else if (v > 10) { ml = v; toast("Counted " + v + " as millilitres"); } // 250 typed in L mode
+    else ml = v * 1000;
+    addWater(ml);
+    const have = waterMl(curDay), T = waterTargetMl(curDay);
+    toast(have >= T ? "Water target hit ✓" : fmtWater(Math.max(0, T - have)) + " to go");
+    render();
+  };
+}
+
 /* ============ Views ============ */
 let view = "today", curDay = todayKey();
 const app = $("#app");
@@ -542,6 +661,7 @@ function renderToday() {
       <span class="sw" aria-hidden="true"></span>
     </label>
   </div>
+  ${waterCardHTML(curDay)}
   <div class="card" id="suggest">${suggestionsHTML(kLeft, pLeft)}</div>`;
   for (const [m, label] of MEALS) {
     const es = dayEntries(curDay).filter(e => e.meal === m);
@@ -568,8 +688,9 @@ function renderToday() {
     S.gymDays = S.gymDays || {};
     if (gym.checked) S.gymDays[curDay] = true; else delete S.gymDays[curDay];
     save(); render();
-    toast(gym.checked ? "Gym day ON · target " + fmt(targets().kcal) + " cal" : "Regular day · target " + fmt(targets().kcal) + " cal");
+    toast(gym.checked ? "Gym day ON · target " + fmt(targets().kcal) + " cal · " + fmtWater(waterTargetMl()) + " water" : "Regular day · target " + fmt(targets().kcal) + " cal · " + fmtWater(waterTargetMl()) + " water");
   };
+  wireWater();
 }
 
 /* Suggestions: high-protein foods that fit remaining calories */
@@ -952,7 +1073,10 @@ function renderHistory() {
   const logged = week.filter(d => d.kcal > 0);
   const avgK = logged.length ? logged.reduce((a, d) => a + d.kcal, 0) / logged.length : 0;
   const avgP = logged.length ? logged.reduce((a, d) => a + d.protein, 0) / logged.length : 0;
-  const keys = Object.keys(S.days).filter(k => S.days[k] && S.days[k].length).sort().reverse();
+  const keys = [...new Set([
+    ...Object.keys(S.days).filter(k => S.days[k] && S.days[k].length),
+    ...Object.keys(S.water || {}).filter(k => (S.water[k] || 0) > 0)
+  ])].sort().reverse();
   app.innerHTML = `<h1>History</h1>
   <div class="card"><h2>Last 7 days</h2>
     <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="7 day calories chart">
@@ -960,14 +1084,16 @@ function renderHistory() {
       <text x="${W - 6}" y="${y(T.kcal) - 4}" text-anchor="end" font-size="10" fill="var(--muted)">target ${fmt(T.kcal)}</text>${bars}</svg>
     <div class="legend"><span><i style="background:var(--accent)"></i>Calories</span><span><i style="background:var(--prot)"></i>Protein (% of goal)</span></div>
     <div class="bigtotal"><div><b>${logged.length ? fmt(avgK) : "–"}</b><span class="muted small">avg calories / day</span></div><div><b>${logged.length ? fmt(avgP) + "g" : "–"}</b><span class="muted small">avg protein / day</span></div></div>
-    <p class="muted tiny" style="margin:0;text-align:center">Averages only count days with food logged (${logged.length} of 7).</p>
+    <div class="bigtotal" style="margin-top:10px"><div><b>${(() => { const wd = week.filter(d => waterMl(d.k) > 0); return wd.length ? fmtWater(wd.reduce((a, d) => a + waterMl(d.k), 0) / wd.length) : "–"; })()}</b><span class="muted small">avg water / day</span></div><div><b>${fmtWater(waterTargetMl(t0))}</b><span class="muted small">today's water target</span></div></div>
+    <p class="muted tiny" style="margin:0;text-align:center">Food averages only count days with food logged (${logged.length} of 7).</p>
   </div>
   <div class="card"><h2>All days</h2>${keys.length ? keys.map(k => {
     const t = totals(k);
     return `<div class="histrow" data-day="${k}"><div class="grow"><div style="font-weight:600">${esc(prettyDay(k))}${k !== t0 && k !== addDays(t0, -1) ? "" : ` <span class="muted small">${parseKey(k).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>`}</div>
-      <div class="muted small">${fmt(t.kcal)} / ${fmt(targets(k).kcal)} cal · ${fmt(t.protein)} / ${fmt(targets(k).protein)}g protein${isGymDay(k) ? " · gym" : ""}</div>
+      <div class="muted small">${fmt(t.kcal)} / ${fmt(targets(k).kcal)} cal · ${fmt(t.protein)} / ${fmt(targets(k).protein)}g protein${isGymDay(k) ? " · gym" : ""} · ${fmtWater(waterMl(k))} / ${fmtWater(waterTargetMl(k))} water</div>
       <div class="bar"><i style="width:${Math.min(100, t.kcal / targets(k).kcal * 100)}%;${t.kcal > targets(k).kcal ? "background:var(--warn)" : ""}"></i></div>
-      <div class="bar p"><i style="width:${Math.min(100, t.protein / targets(k).protein * 100)}%"></i></div></div><span class="muted" style="font-size:22px">›</span></div>`;
+      <div class="bar p"><i style="width:${Math.min(100, t.protein / targets(k).protein * 100)}%"></i></div>
+      <div class="bar w"><i style="width:${Math.min(100, waterMl(k) / waterTargetMl(k) * 100)}%"></i></div></div><span class="muted" style="font-size:22px">›</span></div>`;
   }).join("") : `<p class="empty">Nothing logged yet.</p>`}</div>`;
   app.querySelectorAll("[data-day]").forEach(el => el.onclick = () => { curDay = el.dataset.day; view = "today"; render(); scrollTo(0, 0); });
 }
@@ -1061,6 +1187,12 @@ function renderSettings() {
     <button class="btn block" id="saveT" style="margin-top:14px">Use these numbers</button>
     ${T.manual ? `<button class="btn ghost block" id="resetT" style="margin-top:10px">Go back to calculated targets</button>` : ""}
   </div>
+  <div class="card"><h2>💧 Water</h2>
+    <p class="muted small" style="margin-top:-4px">Your daily water target is about 35 ml per kilogram of body weight, rounded up to the nearest quarter litre. Gym days add 0.75 L. If you eat 400 or more calories over your food target, we add another 0.25 L.</p>
+    <div class="bigtotal"><div><b>${fmtWater(waterBaseMl(false))}</b><span class="muted small">regular day</span></div><div><b>${fmtWater(waterBaseMl(true))}</b><span class="muted small">gym day</span></div></div>
+    <label class="f">Show water in</label>
+    <div class="seg" id="wUnitSeg"><button type="button" data-v="L" class="${waterUnit() === "L" ? "on" : ""}">Litres (L)</button><button type="button" data-v="oz" class="${waterUnit() === "oz" ? "on" : ""}">Ounces (oz)</button></div>
+  </div>
   <div class="card"><h2>My profile</h2>${profileForm(p)}<div id="tbox"></div>
     <button class="btn block" id="saveP">Save profile & update targets</button></div>
   <div class="card"><h2>Backup</h2>
@@ -1085,6 +1217,7 @@ function renderSettings() {
     if (!S.targets || !S.targets.manual || confirm("Replace your own target numbers with the newly calculated ones?")) S.targets = { kcal: c.kcal, protein: c.protein, manual: false };
     save(); renderSettings(); scrollTo(0, 0); toast("Profile saved");
   };
+  $("#wUnitSeg").onclick = e => { const b = e.target.closest("button"); if (!b) return; S.waterUnit = b.dataset.v; save(); renderSettings(); };
   $("#exp").onclick = exportData;
   $("#imp").onclick = () => $("#importFile").click();
   $("#wipe").onclick = () => {
@@ -1116,8 +1249,8 @@ $("#importFile").onchange = e => {
       const nDays = Object.keys(d.days).length;
       if (S.profile && !confirm(`Replace what's on this phone with the backup (${nDays} day${nDays === 1 ? "" : "s"} of food)?`)) return;
       const n = blankState();
-      S = { version: 1, profile: d.profile || null, targets: d.targets || null, days: d.days || {}, gymDays: d.gymDays || {}, custom: Array.isArray(d.custom) ? d.custom : [], recent: Array.isArray(d.recent) ? d.recent : [], favs: Array.isArray(d.favs) ? d.favs : [] };
-      if (!S.profile) S = Object.assign(n, { days: S.days, custom: S.custom });
+      S = { version: 1, profile: d.profile || null, targets: d.targets || null, days: d.days || {}, gymDays: d.gymDays || {}, water: d.water && typeof d.water === "object" ? d.water : {}, waterUnit: d.waterUnit === "oz" ? "oz" : "L", custom: Array.isArray(d.custom) ? d.custom : [], recent: Array.isArray(d.recent) ? d.recent : [], favs: Array.isArray(d.favs) ? d.favs : [] };
+      if (!S.profile) S = Object.assign(n, { days: S.days, custom: S.custom, water: S.water, waterUnit: S.waterUnit });
       save(); view = "today"; curDay = todayKey(); render(); toast("Backup restored");
     } catch (err) { toast("That file isn't a valid backup"); }
     finally { e.target.value = ""; }
@@ -1135,6 +1268,10 @@ document.querySelectorAll(".tabbar button").forEach(b => b.onclick = () => {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && view === "today" && S.profile) { const t = todayKey(); if (render._last && render._last !== t && curDay === render._last) curDay = t; render._last = t; render(); }
 });
+function migrateWater() {
+  S.water = S.water || {};
+  if (S.waterUnit !== "oz") S.waterUnit = "L";
+}
 function ensureCareyDefaults() {
   // Preset for Carey: skip first-run setup. Only seed if nothing saved yet.
   if (S.profile) return;
@@ -1155,6 +1292,7 @@ function ensureCareyDefaults() {
   }
   save();
 }
+migrateWater();
 ensureCareyDefaults();
 render._last = todayKey();
 render();
