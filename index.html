@@ -161,6 +161,16 @@ label.f{display:block;margin:12px 0 6px;font-weight:600;font-size:15px}
 .wmore .wbtn{min-height:48px}
 .wcustom{display:flex;gap:8px;margin-top:8px;align-items:center}
 .wcustom .input{flex:1}
+
+.wbanner{margin:10px 0 8px;padding:10px 12px;border-radius:12px;font-size:14.5px;font-weight:550;line-height:1.35;border:1px solid transparent}
+.wbanner.behind{background:#fff4e5;color:#8a4a00;border-color:#f0d0a0}
+.wbanner.track{background:var(--water-soft);color:#0b5e80;border-color:color-mix(in srgb,var(--water) 25%,transparent)}
+.wbanner.done{background:var(--accent-soft);color:var(--accent2);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.wbanner.over{background:var(--bg);color:var(--text);border-color:var(--line)}
+@media (prefers-color-scheme: dark){
+  .wbanner.behind{background:#3a2a14;color:#ffcc80;border-color:#6a4a20}
+  .wbanner.track{color:#b6e4f5}
+}
 #scanOverlay{position:fixed;inset:0;background:#000;z-index:100;display:flex;flex-direction:column}
 #scanOverlay video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 #scanOverlay .vf{position:absolute;left:10%;right:10%;top:30%;height:22%;border:3px solid #fff;border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.45)}
@@ -432,6 +442,7 @@ function load() {
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { toast("Couldn't save. Is private browsing on?"); }
+  if (typeof syncWaterSnap === "function") syncWaterSnap();
 }
 
 /* ============ Helpers ============ */
@@ -562,11 +573,187 @@ function addWater(ml, k) {
   S.water[k] = Math.max(0, Math.round((S.water[k] || 0) + ml));
   save();
 }
+
+/* ============ Water reminders (local only; no push server) ============ */
+let _nowHook = null;
+function nowDate() { return _nowHook ? new Date(_nowHook) : new Date(); }
+function reminderSettings() {
+  const d = { on: true, every: 2, start: "08:00", end: "20:00" };
+  const r = Object.assign({}, d, S.reminders && typeof S.reminders === "object" ? S.reminders : {});
+  r.on = r.on !== false;
+  r.every = [1, 2, 3].includes(+r.every) ? +r.every : 2;
+  const ok = t => /^\d{1,2}:\d{2}$/.test(t || "");
+  if (!ok(r.start)) r.start = d.start;
+  if (!ok(r.end)) r.end = d.end;
+  return r;
+}
+function hmToMin(t) { const [h, m] = (t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); }
+function fmtClock(mins) {
+  mins = ((mins % 1440) + 1440) % 1440;
+  let h = Math.floor(mins / 60), m = mins % 60;
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return m ? h + ":" + String(m).padStart(2, "0") + " " + ap : h + " " + ap;
+}
+function fmtAbout(ml) { return fmtWater(Math.max(250, Math.round(ml / 250) * 250)); }
+function reminderWindow(now) {
+  const r = reminderSettings();
+  const n = now || nowDate();
+  const start = hmToMin(r.start), end = hmToMin(r.end);
+  const span = end - start;
+  const cur = n.getHours() * 60 + n.getMinutes() + n.getSeconds() / 60;
+  const slots = [];
+  if (span > 0) for (let t = start; t <= end + 1e-6; t += r.every * 60) slots.push(Math.round(t));
+  return { r, start, end, span, cur, slots, inWindow: span > 0 && cur >= start && cur <= end };
+}
+function waterPace(k, now) {
+  k = k || todayKey();
+  now = now || nowDate();
+  const w = reminderWindow(now), T = waterTargetMl(k), have = waterMl(k);
+  const frac = w.span > 0 ? Math.max(0, Math.min(1, (w.cur - w.start) / w.span)) : 0;
+  const expected = Math.round(T * frac);
+  const due = w.slots.filter(t => w.cur + 1e-6 >= t).pop();
+  const next = w.slots.find(t => t > w.cur + 1e-6);
+  let status, banner;
+  if (have >= T) {
+    status = "done";
+    banner = "Goal hit 🎉 Nice work — you're done drinking for today.";
+  } else if (w.span <= 0) {
+    status = "track";
+    banner = fmtWater(T - have) + " left today.";
+  } else if (w.cur < w.start) {
+    status = "track";
+    banner = "Reminders start at " + fmtClock(w.start) + ". Today's goal is " + fmtWater(T) + ".";
+  } else if (w.cur > w.end) {
+    status = "over";
+    banner = "Reminder window is over. " + fmtWater(T - have) + " still to go today.";
+  } else if (expected - have >= 125) {
+    status = "behind";
+    const needNext = next != null ? Math.max(0, Math.round(T * (next - w.start) / w.span) - have) : T - have;
+    banner = "About " + fmtAbout(expected - have) + " behind pace. Drink " + fmtWater(needNext || T - have) + " by " + fmtClock(next != null ? next : w.end) + " to get back on track.";
+  } else {
+    status = "track";
+    const needNext = next != null ? Math.max(0, Math.round(T * (next - w.start) / w.span) - have) : T - have;
+    banner = needNext > 0
+      ? "On track. " + fmtWater(needNext) + " more by " + fmtClock(next != null ? next : w.end) + " keeps you there."
+      : "On track. You're ahead of pace — keep it up!";
+  }
+  return { T, have, expected, status, banner, due, next, ...w };
+}
+function waterNotifyBody(p) {
+  if (!p || p.have >= p.T) return null;
+  const progress = "💧 " + fmtWater(p.have, true) + " of " + fmtWater(p.T);
+  if (p.expected - p.have >= 125) return progress + " — about " + fmtAbout(p.expected - p.have) + " behind pace. Have a glass!";
+  return progress + " — on track. Keep it up!";
+}
+
+function waterBannerHTML(k) {
+  if (k !== todayKey()) return "";
+  const p = waterPace(k);
+  return `<div class="wbanner ${p.status}" id="wBanner">${esc(p.banner)}</div>`;
+}
+
+/* IndexedDB: pending +250 ml from a notification, and a snapshot the SW can read */
+const IDB_NAME = "careyFoodTrackerIDB", IDB_STORE = "kv";
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const q = indexedDB.open(IDB_NAME, 1);
+    q.onupgradeneeded = () => q.result.createObjectStore(IDB_STORE);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+}
+async function idbGet(key) {
+  try { const db = await idbOpen(); return await new Promise((res, rej) => { const r = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(key); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+  catch (e) { return undefined; }
+}
+async function idbSet(key, val) {
+  try { const db = await idbOpen(); await new Promise((res, rej) => { const r = db.transaction(IDB_STORE, "readwrite").objectStore(IDB_STORE).put(val, key); r.onsuccess = () => res(); r.onerror = () => rej(r.error); }); }
+  catch (e) {}
+}
+async function syncWaterSnap() {
+  const k = todayKey();
+  await idbSet("waterSnap", {
+    day: k, have: waterMl(k), target: waterTargetMl(k), unit: waterUnit(),
+    reminders: reminderSettings(), lastFired: (S.reminders && S.reminders.lastFired) || "",
+    gym: isGymDay(k)
+  });
+}
+async function applyPendingWater() {
+  const pending = await idbGet("pendingWater");
+  if (!pending || !pending.length) return;
+  for (const it of pending) if (it && it.ml) addWater(it.ml, it.day || todayKey());
+  await idbSet("pendingWater", []);
+  toast("Added water from a reminder");
+  if (view === "today") render();
+}
+
+async function maybeFireReminder() {
+  const r = reminderSettings();
+  if (!r.on) return "off";
+  const k = todayKey(), p = waterPace(k);
+  if (p.have >= p.T) return "done";
+  if (p.due == null) return "no-slot";
+  const key = k + "-" + p.due;
+  if (S.reminders && S.reminders.lastFired === key) return "already";
+  if (!("Notification" in window) || Notification.permission !== "granted") return "no-perm";
+  const body = waterNotifyBody(p);
+  if (!body) return "skip";
+  try {
+    if (navigator.serviceWorker) {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification("Carey's Food Tracker", {
+        body, icon: "./icon-192.png", badge: "./icon-192.png",
+        tag: "water-remind", renotify: true,
+        data: { type: "water", day: k },
+        actions: [{ action: "add250", title: "+250 ml" }]
+      });
+    }
+    S.reminders = Object.assign({}, r, { lastFired: key });
+    save();
+    return "fired";
+  } catch (e) { return "error"; }
+}
+function msUntilNextReminder() {
+  const p = reminderWindow();
+  const nowMs = nowDate().getTime();
+  const startOfDay = new Date(nowDate()); startOfDay.setHours(0, 0, 0, 0);
+  let next = p.slots.find(t => t > p.cur + 0.05);
+  let dayAdd = 0;
+  if (next == null) { next = p.slots[0]; dayAdd = 1; }
+  if (next == null) return 60 * 60 * 1000;
+  return Math.max(1000, startOfDay.getTime() + dayAdd * 86400000 + next * 60000 - nowMs);
+}
+let remindTimer = null, remindPulse = null;
+function stopWaterReminderLoop() { clearTimeout(remindTimer); clearInterval(remindPulse); remindTimer = remindPulse = null; }
+function startWaterReminderLoop() {
+  stopWaterReminderLoop();
+  if (!reminderSettings().on) return;
+  const arm = () => {
+    clearTimeout(remindTimer);
+    remindTimer = setTimeout(async () => { await maybeFireReminder(); arm(); }, Math.min(msUntilNextReminder(), 30 * 60 * 1000));
+  };
+  arm();
+  remindPulse = setInterval(() => { if (!document.hidden) maybeFireReminder(); }, 30000);
+}
+async function registerPeriodicSync() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (reg.periodicSync) await reg.periodicSync.register("water-reminder", { minInterval: 60 * 60 * 1000 });
+  } catch (e) {}
+}
+async function enableWaterReminders() {
+  if (!("Notification" in window)) return toast("This browser can't show notifications");
+  const perm = await Notification.requestPermission();
+  if (perm === "granted") { toast("Reminders are on"); startWaterReminderLoop(); registerPeriodicSync(); }
+  else toast("Permission wasn't granted. You can allow notifications in Chrome's site settings.");
+}
+
 function waterCardHTML(k) {
   const have = waterMl(k), T = waterTargetMl(k);
   const left = T - have, done = have >= T, pct = T > 0 ? Math.min(100, have / T * 100) : 0;
   const oz = waterUnit() === "oz";
-  const late = k === todayKey() && (new Date().getHours() >= 18) && have < T * 0.7;
+  const late = k === todayKey() && nowDate().getHours() >= 18 && have < T * 0.7;
   const btn = (ml, name) => `<button type="button" class="wbtn" data-water="${ml}">+ ${name}<b>${oz ? Math.round(ml / 29.5735295625) + " oz" : ml + " ml"}</b></button>`;
   return `<div class="card" id="waterCard">
     <div class="whead"><h2>💧 Water</h2>
@@ -574,7 +761,8 @@ function waterCardHTML(k) {
       <button type="button" class="winfo" id="wInfo" aria-label="How this target is calculated">i</button></div>
     <div class="wbar" role="progressbar" aria-valuenow="${have}" aria-valuemax="${T}"><i style="width:${pct.toFixed(1)}%"></i></div>
     <div class="muted small">${done ? "✓ Water target hit" : fmtWater(Math.max(0, left)) + " to go"} · ${esc(waterWhy(k))}</div>
-    ${late ? `<div class="muted small" style="margin-top:6px">It's getting late and you're a bit behind — a couple of glasses this evening will get you there.</div>` : ""}
+    ${waterBannerHTML(k)}
+    ${late && !done ? `<div class="muted small" style="margin-top:6px">It's getting late and you're a bit behind — a couple of glasses this evening will get you there.</div>` : ""}
     <p class="muted tiny hidden" id="wWhyMore" style="margin:8px 0 0">Your target starts at about 35 ml of water per kilogram of body weight, rounded up to the nearest quarter litre. Gym days add 0.75 L for sweat. If you eat 400 or more calories over your food target, we add another 0.25 L. This is a guide, not a medical rule — coffee and tea count toward the total.</p>
     <div class="wbtns">${btn(250, "Glass")}${btn(500, "Bottle")}${btn(750, "Large bottle")}</div>
     <div class="wmore">
@@ -1177,6 +1365,50 @@ function renderSetup() {
   $("#restore").onclick = () => $("#importFile").click();
 }
 
+
+function remindersSettingsHTML() {
+  const r = reminderSettings();
+  const perm = ("Notification" in window) ? Notification.permission : "denied";
+  const permLine = !("Notification" in window) ? "This browser can't show notifications. The in-app banner will still update when you open the app."
+    : perm === "granted" ? "Notifications are allowed on this phone."
+    : perm === "denied" ? "Notifications are blocked. In Chrome: lock icon in the address bar, or Settings › Apps › Carey Food › Notifications, then tap Enable reminders again."
+    : "Tap Enable reminders to allow notifications. We won't ask until you do.";
+  return `<div class="card" id="remindCard"><h2>💧 Water reminders</h2>
+    <p class="muted small" style="margin-top:-4px">A progress nudge on a schedule you pick, compared with an even pace across the day. Free, on this phone only — no account and no server.</p>
+    <label class="gymrow ${r.on ? "on" : ""}" id="remindToggleRow">
+      <div class="grow"><b style="font-size:18px">Reminders: ${r.on ? "ON" : "OFF"}</b><div class="small" style="opacity:.85">${r.on ? "Every " + r.every + " hour" + (r.every === 1 ? "" : "s") + " from " + fmtClock(hmToMin(r.start)) + " to " + fmtClock(hmToMin(r.end)) : "Tap to turn on"}</div></div>
+      <input type="checkbox" id="remindOn" ${r.on ? "checked" : ""}>
+      <span class="sw" aria-hidden="true"></span>
+    </label>
+    <label class="f">Remind every</label>
+    <div class="seg" id="rEverySeg">${[1,2,3].map(h => `<button type="button" data-v="${h}" class="${r.every === h ? "on" : ""}">${h} hour${h === 1 ? "" : "s"}</button>`).join("")}</div>
+    <div class="row" style="margin-top:12px;gap:12px">
+      <div class="grow"><label class="f" for="rStart">Start</label><input class="input" id="rStart" type="time" value="${esc(r.start)}"></div>
+      <div class="grow"><label class="f" for="rEnd">End</label><input class="input" id="rEnd" type="time" value="${esc(r.end)}"></div>
+    </div>
+    <p class="muted small" style="margin:12px 0 0">${permLine}</p>
+    ${perm !== "granted" ? `<button class="btn block" id="rEnable" style="margin-top:12px">Enable reminders</button>` : `<p class="muted small" style="margin:8px 0 0">You're all set. I'll nudge you while the app is open or running in the background.</p>`}
+    <p class="muted tiny" style="margin:12px 0 0">Android limit: reminders are best-effort. They work well while the app is open or in the background, but they usually <b>won't fire if you fully close it</b> (swipe it away). Open the app once in the morning so today's checks can start. There's no pop-up if you've already hit your water goal.</p>
+  </div>`;
+}
+function wireReminderSettings() {
+  const saveR = patch => {
+    const cur = reminderSettings();
+    const start = ($("#rStart") && $("#rStart").value) || cur.start;
+    const end = ($("#rEnd") && $("#rEnd").value) || cur.end;
+    if (hmToMin(end) <= hmToMin(start)) return toast("End time needs to be after the start time");
+    S.reminders = Object.assign({}, cur, { start, end }, patch || {});
+    save(); startWaterReminderLoop(); renderSettings();
+  };
+  const tog = $("#remindOn");
+  if (tog) tog.onchange = () => saveR({ on: tog.checked });
+  const ev = $("#rEverySeg");
+  if (ev) ev.onclick = e => { const b = e.target.closest("button"); if (b) saveR({ every: +b.dataset.v }); };
+  if ($("#rStart")) $("#rStart").onchange = () => saveR();
+  if ($("#rEnd")) $("#rEnd").onchange = () => saveR();
+  if ($("#rEnable")) $("#rEnable").onclick = async () => { await enableWaterReminders(); renderSettings(); };
+}
+
 function renderSettings() {
   const p = S.profile, T = baseTargets();
   app.innerHTML = `<h1>Settings</h1>
@@ -1193,6 +1425,7 @@ function renderSettings() {
     <label class="f">Show water in</label>
     <div class="seg" id="wUnitSeg"><button type="button" data-v="L" class="${waterUnit() === "L" ? "on" : ""}">Litres (L)</button><button type="button" data-v="oz" class="${waterUnit() === "oz" ? "on" : ""}">Ounces (oz)</button></div>
   </div>
+  ${remindersSettingsHTML()}
   <div class="card"><h2>My profile</h2>${profileForm(p)}<div id="tbox"></div>
     <button class="btn block" id="saveP">Save profile & update targets</button></div>
   <div class="card"><h2>Backup</h2>
@@ -1218,6 +1451,7 @@ function renderSettings() {
     save(); renderSettings(); scrollTo(0, 0); toast("Profile saved");
   };
   $("#wUnitSeg").onclick = e => { const b = e.target.closest("button"); if (!b) return; S.waterUnit = b.dataset.v; save(); renderSettings(); };
+  wireReminderSettings();
   $("#exp").onclick = exportData;
   $("#imp").onclick = () => $("#importFile").click();
   $("#wipe").onclick = () => {
@@ -1249,8 +1483,8 @@ $("#importFile").onchange = e => {
       const nDays = Object.keys(d.days).length;
       if (S.profile && !confirm(`Replace what's on this phone with the backup (${nDays} day${nDays === 1 ? "" : "s"} of food)?`)) return;
       const n = blankState();
-      S = { version: 1, profile: d.profile || null, targets: d.targets || null, days: d.days || {}, gymDays: d.gymDays || {}, water: d.water && typeof d.water === "object" ? d.water : {}, waterUnit: d.waterUnit === "oz" ? "oz" : "L", custom: Array.isArray(d.custom) ? d.custom : [], recent: Array.isArray(d.recent) ? d.recent : [], favs: Array.isArray(d.favs) ? d.favs : [] };
-      if (!S.profile) S = Object.assign(n, { days: S.days, custom: S.custom, water: S.water, waterUnit: S.waterUnit });
+      S = { version: 1, profile: d.profile || null, targets: d.targets || null, days: d.days || {}, gymDays: d.gymDays || {}, water: d.water && typeof d.water === "object" ? d.water : {}, waterUnit: d.waterUnit === "oz" ? "oz" : "L", reminders: d.reminders && typeof d.reminders === "object" ? d.reminders : reminderSettings(), custom: Array.isArray(d.custom) ? d.custom : [], recent: Array.isArray(d.recent) ? d.recent : [], favs: Array.isArray(d.favs) ? d.favs : [] };
+      if (!S.profile) S = Object.assign(n, { days: S.days, custom: S.custom, water: S.water, waterUnit: S.waterUnit, reminders: S.reminders });
       save(); view = "today"; curDay = todayKey(); render(); toast("Backup restored");
     } catch (err) { toast("That file isn't a valid backup"); }
     finally { e.target.value = ""; }
@@ -1266,11 +1500,22 @@ document.querySelectorAll(".tabbar button").forEach(b => b.onclick = () => {
 });
 // roll over to the new day if the app stays open past midnight
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && view === "today" && S.profile) { const t = todayKey(); if (render._last && render._last !== t && curDay === render._last) curDay = t; render._last = t; render(); }
+  if (document.hidden) return;
+  if (S.profile) {
+    const t = todayKey();
+    if (view === "today") {
+      if (render._last && render._last !== t && curDay === render._last) curDay = t;
+      render._last = t;
+      render();
+    }
+    maybeFireReminder();
+    applyPendingWater();
+  }
 });
 function migrateWater() {
   S.water = S.water || {};
   if (S.waterUnit !== "oz") S.waterUnit = "L";
+  if (!S.reminders || typeof S.reminders !== "object") S.reminders = { on: true, every: 2, start: "08:00", end: "20:00" };
 }
 function ensureCareyDefaults() {
   // Preset for Carey: skip first-run setup. Only seed if nothing saved yet.
@@ -1296,8 +1541,20 @@ migrateWater();
 ensureCareyDefaults();
 render._last = todayKey();
 render();
+startWaterReminderLoop();
+applyPendingWater();
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").then(() => { registerPeriodicSync(); }).catch(() => {});
+  });
+  navigator.serviceWorker.addEventListener("message", e => {
+    const d = e.data || {};
+    if (d.type === "addWater" && d.ml) {
+      addWater(d.ml, d.day || todayKey());
+      toast("Added " + fmtWater(d.ml) + " from the reminder");
+      if (view === "today") render();
+    }
+  });
 }
 </script>
 </body>
